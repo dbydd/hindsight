@@ -217,6 +217,62 @@ def _dedup_active(config: Any) -> bool:
     return get_config().database_backend != "oracle"
 
 
+class _EmbeddingCache:
+    """Per-LLM-batch prefetch cache for observation embeddings.
+
+    Consolidation used to embed ONE text per network call: each action's prepare
+    handed ``generate_embeddings_batch`` a single-element list, so a batch of N
+    actions paid N round trips to an embedder that already batches internally
+    (OpenAIEmbeddings slices its input by ``batch_size=100``). ``warm`` collapses
+    the whole batch into one call; ``get`` returns the precomputed pgvector literal.
+
+    The vector space is untouched: the same embedder, the same text, and the default
+    ``input_type`` (all call sites use it) — only the number of HTTP requests drops.
+    A miss, an empty batch, or a failed warm falls back to the pre-existing single-text
+    call, so behaviour is never worse than before.
+
+    Concurrency: the concurrent prepare tasks (``_PREPARE_CONCURRENCY``) share one
+    cache instance. It is read-mostly: ``warm`` fills it before the tasks start, and
+    the concurrent ``get`` calls only write distinct keys (one text per action), so
+    dict reads/writes on distinct keys race nowhere.
+    """
+
+    def __init__(self, embeddings: Any) -> None:
+        self._embeddings = embeddings
+        self._by_text: dict[str, str] = {}
+
+    async def warm(self, texts: "list[str]") -> None:
+        """Prefetch every distinct text in one batched call.
+
+        Failures are swallowed on purpose: one un-embeddable text must not abort the
+        whole LLM batch, and each miss then retries per text through ``get``, which is
+        exactly the pre-patch behaviour.
+        """
+        unique = list(dict.fromkeys(t for t in texts if t))
+        if not unique:
+            return
+        try:
+            embs = await embedding_utils.generate_embeddings_batch(self._embeddings, unique)
+        except Exception:
+            logger.debug("[CONSOLIDATION] batched embedding prefetch failed; falling back per text", exc_info=True)
+            return
+        # A short/partial response must not misalign text<->vector, so zip strictly.
+        for text, emb in zip(unique, embs or []):
+            self._by_text[text] = str(emb)
+
+    async def get(self, text: str) -> str | None:
+        """Return the pgvector literal for ``text``, or None when it cannot be embedded."""
+        cached = self._by_text.get(text)
+        if cached is not None:
+            return cached
+        embs = await embedding_utils.generate_embeddings_batch(self._embeddings, [text])
+        if not embs:
+            return None
+        cached = str(embs[0])
+        self._by_text[text] = cached
+        return cached
+
+
 @dataclass(frozen=True)
 class _TemporalBounds:
     """The temporal columns an observation inherits from the facts behind it.
@@ -2476,6 +2532,19 @@ async def _process_memory_batch(
         else None
     )
 
+    # Prefetch every embedding this batch will need in ONE call, BEFORE the concurrent
+    # prepare gather below. Each action's prepare used to embed its own text one-per-call;
+    # the texts are all known before the tasks start. A miss (or a failed warm) falls back
+    # to the same single-text embed inside the prepare. The list is a superset (an action
+    # rejected by the security checks below still gets a free ride in the same batched
+    # request), which costs one slot, not one round trip.
+    emb_cache = _EmbeddingCache(memory_engine.embeddings)
+    batch_embed_texts = [u.text for u in llm_result.updates if u.text] + [c.text for c in llm_result.creates if c.text]
+    t0 = time.time()
+    await emb_cache.warm(batch_embed_texts)
+    if perf and batch_embed_texts:
+        perf.record_timing("embedding", time.time() - t0)
+
     # --- Prepare: deletes -----------------------------------------------------
     # Deletes carry no slow work; validating them here keeps the whole decision set in
     # one place. They are still applied first inside the transaction, so an observation
@@ -2534,7 +2603,7 @@ async def _process_memory_batch(
                 f"{update.observation_id} were deleted before embedding"
             )
             return None
-        embedding_str = await _embed_observation_text(memory_engine, update.text, perf)
+        embedding_str = await emb_cache.get(update.text)
         prepared = _PreparedUpdate(
             update=update,
             model=model,
@@ -2603,7 +2672,7 @@ async def _process_memory_batch(
         if not any(str(mid) in live_before_prepare for mid in create_source_ids):
             logger.debug(f"Create skipped: all {len(create_source_ids)} source memories were deleted before embedding")
             return None
-        embedding_str = await _embed_observation_text(memory_engine, create.text, perf)
+        embedding_str = await emb_cache.get(create.text)
         prepared_create = _PreparedCreate(
             text=create.text,
             source_mems=source_mems,
