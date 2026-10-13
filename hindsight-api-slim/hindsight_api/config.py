@@ -646,6 +646,12 @@ ENV_RERANKER_SILICONFLOW_API_KEY = "HINDSIGHT_API_RERANKER_SILICONFLOW_API_KEY"
 ENV_RERANKER_SILICONFLOW_MODEL = "HINDSIGHT_API_RERANKER_SILICONFLOW_MODEL"
 ENV_RERANKER_SILICONFLOW_BASE_URL = "HINDSIGHT_API_RERANKER_SILICONFLOW_BASE_URL"
 
+# NVIDIA NIM configuration (reranker only; native v2/retrieval wire format)
+ENV_RERANKER_NVIDIA_API_KEY = "HINDSIGHT_API_RERANKER_NVIDIA_API_KEY"
+ENV_RERANKER_NVIDIA_MODEL = "HINDSIGHT_API_RERANKER_NVIDIA_MODEL"
+ENV_RERANKER_NVIDIA_BASE_URL = "HINDSIGHT_API_RERANKER_NVIDIA_BASE_URL"
+ENV_RERANKER_NVIDIA_TIMEOUT = "HINDSIGHT_API_RERANKER_NVIDIA_TIMEOUT"
+
 # TypeSafe configuration (reranker only; typed-question API, not a /rerank endpoint)
 ENV_RERANKER_TYPESAFE_API_KEY = "HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY"
 ENV_RERANKER_TYPESAFE_MODEL = "HINDSIGHT_API_RERANKER_TYPESAFE_MODEL"
@@ -1434,6 +1440,12 @@ DEFAULT_RERANKER_ZEROENTROPY_MODEL = "zerank-2"
 
 DEFAULT_RERANKER_SILICONFLOW_MODEL = "BAAI/bge-reranker-v2-m3"
 DEFAULT_RERANKER_SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+
+# NVIDIA NIM hosts reranking under a per-model path on a different host than
+# the OpenAI-compatible surface (integrate.api.nvidia.com). The reranking path is
+# built from the model id, so the model must carry its "nvidia/" prefix.
+DEFAULT_RERANKER_NVIDIA_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2"
+DEFAULT_RERANKER_NVIDIA_BASE_URL = "https://ai.api.nvidia.com/v1"
 
 DEFAULT_RERANKER_TYPESAFE_MODEL = "jev-latest"
 DEFAULT_RERANKER_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
@@ -2749,6 +2761,11 @@ class RerankerMemberConfig:
     siliconflow_model: str
     siliconflow_base_url: str
     siliconflow_timeout: float
+    # nvidia
+    nvidia_api_key: str | None
+    nvidia_model: str
+    nvidia_base_url: str
+    nvidia_timeout: float
     # typesafe
     typesafe_api_key: str | None
     typesafe_model: str
@@ -2904,6 +2921,10 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
                 siliconflow_model=_member_str(base, "SILICONFLOW_MODEL", DEFAULT_RERANKER_SILICONFLOW_MODEL),
                 siliconflow_base_url=_member_str(base, "SILICONFLOW_BASE_URL", DEFAULT_RERANKER_SILICONFLOW_BASE_URL),
                 siliconflow_timeout=_member_float(base, "SILICONFLOW_TIMEOUT", DEFAULT_RERANKER_SILICONFLOW_TIMEOUT),
+                nvidia_api_key=_member_opt_str(base, "NVIDIA_API_KEY"),
+                nvidia_model=_member_str(base, "NVIDIA_MODEL", DEFAULT_RERANKER_NVIDIA_MODEL),
+                nvidia_base_url=_member_str(base, "NVIDIA_BASE_URL", DEFAULT_RERANKER_NVIDIA_BASE_URL),
+                nvidia_timeout=_member_float(base, "NVIDIA_TIMEOUT", DEFAULT_RERANKER_SILICONFLOW_TIMEOUT),
                 typesafe_api_key=_member_opt_str(base, "TYPESAFE_API_KEY"),
                 typesafe_model=_member_str(base, "TYPESAFE_MODEL", DEFAULT_RERANKER_TYPESAFE_MODEL),
                 typesafe_base_url=_member_str(base, "TYPESAFE_BASE_URL", DEFAULT_RERANKER_TYPESAFE_BASE_URL),
@@ -3315,6 +3336,10 @@ class HindsightConfig:
     reranker_siliconflow_model: str
     reranker_siliconflow_base_url: str
     reranker_siliconflow_timeout: float
+    reranker_nvidia_api_key: str | None
+    reranker_nvidia_model: str
+    reranker_nvidia_base_url: str
+    reranker_nvidia_timeout: float
     reranker_typesafe_api_key: str | None
     reranker_typesafe_model: str
     reranker_typesafe_base_url: str
@@ -3929,6 +3954,10 @@ class HindsightConfig:
             siliconflow_model=self.reranker_siliconflow_model,
             siliconflow_base_url=self.reranker_siliconflow_base_url,
             siliconflow_timeout=self.reranker_siliconflow_timeout,
+            nvidia_api_key=self.reranker_nvidia_api_key,
+            nvidia_model=self.reranker_nvidia_model,
+            nvidia_base_url=self.reranker_nvidia_base_url,
+            nvidia_timeout=self.reranker_nvidia_timeout,
             typesafe_api_key=self.reranker_typesafe_api_key,
             typesafe_model=self.reranker_typesafe_model,
             typesafe_base_url=self.reranker_typesafe_base_url,
@@ -4762,6 +4791,15 @@ class HindsightConfig:
             ),
             reranker_siliconflow_timeout=float(
                 os.getenv(ENV_RERANKER_SILICONFLOW_TIMEOUT, str(DEFAULT_RERANKER_SILICONFLOW_TIMEOUT))
+            ),
+            # NVIDIA NIM reranker (native v2/retrieval wire format)
+            reranker_nvidia_api_key=os.getenv(ENV_RERANKER_NVIDIA_API_KEY),
+            reranker_nvidia_model=os.getenv(ENV_RERANKER_NVIDIA_MODEL, DEFAULT_RERANKER_NVIDIA_MODEL),
+            reranker_nvidia_base_url=os.getenv(
+                ENV_RERANKER_NVIDIA_BASE_URL, DEFAULT_RERANKER_NVIDIA_BASE_URL
+            ),
+            reranker_nvidia_timeout=float(
+                os.getenv(ENV_RERANKER_NVIDIA_TIMEOUT, str(DEFAULT_RERANKER_SILICONFLOW_TIMEOUT))
             ),
             # TypeSafe reranker
             reranker_typesafe_api_key=os.getenv(ENV_RERANKER_TYPESAFE_API_KEY),
