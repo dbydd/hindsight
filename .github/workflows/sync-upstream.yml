@@ -1,0 +1,91 @@
+name: Sync upstream
+
+# Keep this fork current with the upstream default branch.
+#
+# The fork exists to carry two local patches on a side branch (see the repository
+# description and `patches/README.md`); it is not meant to diverge on `main`. This job
+# pulls upstream in on a schedule so `main` stays current instead of drifting, and so the
+# patch branch can be rebased onto a recent tag without a long merge.
+#
+# `main` carries exactly one local commit — this workflow — because GitHub only runs
+# workflows from a branch that exists on the default branch. Everything else on `main` is
+# upstream. The job therefore fast-forwards when it can and merges when it must, and it
+# refuses to run if `main` has grown real local work: divergence outside this file is a
+# decision, and it should be a visible one rather than something a bot silently rewrites.
+#
+# The patch branch is deliberately not touched: a patch must match its base tag exactly,
+# so it is rebased by hand (patches/README.md documents the pass).
+
+on:
+  schedule:
+    # 04:17 UTC daily — off the hour to avoid the scheduler's peak.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+  # Also sync right after someone pushes to main, so a hand-rebased patch branch does not
+  # sit on a stale base waiting for the next cron.
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork main with full history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream main
+        run: |
+          set -euo pipefail
+
+          git remote add upstream https://github.com/vectorize-io/hindsight.git
+          git fetch --no-tags upstream main
+
+          upstream_sha="$(git rev-parse upstream/main)"
+          local_sha="$(git rev-parse HEAD)"
+          echo "upstream main: ${upstream_sha}"
+          echo "fork main    : ${local_sha}"
+
+          if [ "${upstream_sha}" = "${local_sha}" ]; then
+            echo "Already up to date."
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "${upstream_sha}" HEAD; then
+            echo "Fork main is ahead of upstream; nothing to bring in."
+            exit 0
+          fi
+
+          # Refuse to merge if the only local commit is not this workflow: real local work
+          # on main is a deliberate divergence a bot must not paper over.
+          local_commits="$(git rev-list --count "upstream/main..HEAD")"
+          if [ "${local_commits}" -gt 1 ]; then
+            echo "::error::main carries ${local_commits} local commits, not just this workflow; refusing auto-merge."
+            git log --oneline "upstream/main..HEAD"
+            exit 1
+          fi
+
+          if git merge-base --is-ancestor HEAD "${upstream_sha}"; then
+            echo "Fast-forwarding."
+            git merge --ff-only "${upstream_sha}"
+          else
+            echo "Local workflow commit present; merging upstream in."
+            git merge --no-edit "${upstream_sha}"
+          fi
+
+          git push origin main
+          echo "main is now at $(git rev-parse --short HEAD)."
