@@ -4,14 +4,19 @@ name: Sync upstream
 #
 # The fork exists to carry two local patches on a side branch (see the repository
 # description and `patches/README.md`); it is not meant to diverge on `main`. This job
-# pulls upstream in on a schedule so `main` stays current instead of drifting, and so the
-# patch branch can be rebased onto a recent tag without a long merge.
+# syncs `main` with upstream on a schedule so the patch branch can be rebased onto a
+# recent tag without a long merge.
 #
-# `main` carries exactly one local commit — this workflow — because GitHub only runs
-# workflows from a branch that exists on the default branch. Everything else on `main` is
-# upstream. The job therefore fast-forwards when it can and merges when it must, and it
-# refuses to run if `main` has grown real local work: divergence outside this file is a
-# decision, and it should be a visible one rather than something a bot silently rewrites.
+# The sync runs through GitHub's own "merge-upstream" endpoint rather than a local git
+# push. That endpoint is executed by GitHub, so it needs only `contents: write` and is
+# not subject to the restriction that blocks a workflow token from pushing changes to
+# `.github/workflows/*` (which upstream edits regularly). A local push would be rejected
+# with "refusing to allow a GitHub App to create or update workflow ... without workflows
+# permission".
+#
+# The endpoint merges upstream into `main`, keeping this workflow file's commit. GitHub
+# refuses the merge (409/422) instead of discarding anything, so real local work on `main`
+# cannot be silently overwritten: it surfaces as a failed run for a human to reconcile.
 #
 # The patch branch is deliberately not touched: a patch must match its base tag exactly,
 # so it is rebased by hand (patches/README.md documents the pass).
@@ -28,7 +33,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 concurrency:
   group: sync-upstream
@@ -38,60 +42,31 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out fork main with full history
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Merge upstream main
+      - name: Sync main with upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          git remote add upstream https://github.com/vectorize-io/hindsight.git
-          git fetch --no-tags upstream main
-
-          upstream_sha="$(git rev-parse upstream/main)"
-          local_sha="$(git rev-parse HEAD)"
+          upstream_sha="$(gh api repos/vectorize-io/hindsight/commits/main --jq .sha)"
+          fork_sha="$(gh api repos/${GITHUB_REPOSITORY}/commits/main --jq .sha)"
           echo "upstream main: ${upstream_sha}"
-          echo "fork main    : ${local_sha}"
+          echo "fork main    : ${fork_sha}"
 
-          if [ "${upstream_sha}" = "${local_sha}" ]; then
+          if [ "${upstream_sha}" = "${fork_sha}" ]; then
             echo "Already up to date."
             exit 0
           fi
 
-          if git merge-base --is-ancestor "${upstream_sha}" HEAD; then
-            echo "Fork main is ahead of upstream; nothing to bring in."
-            exit 0
-          fi
-
-          # Previous syncs add merge commits, and workflow maintenance can add several
-          # commits. Inspect the fork-only tree changes instead: only this workflow file is
-          # allowed locally; any other changed path is deliberate divergence.
-          local_paths="$(git diff --name-only upstream/main...HEAD)"
-          unexpected_paths=""
-          if [ -n "${local_paths}" ]; then
-            unexpected_paths="$(printf '%s\n' "${local_paths}" | grep -vxF '.github/workflows/sync-upstream.yml' || true)"
-          fi
-          if [ -n "${unexpected_paths}" ]; then
-            echo "::error::main has fork-only changes outside the sync workflow; refusing auto-merge."
-            printf '%s\n' "${unexpected_paths}"
+          # The endpoint reports merge_type=fast-forward when the fork had no local
+          # commits, and merge when it did (this workflow's own commit).
+          response="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+            -f branch=main 2>&1)" || {
+            echo "::error::merge-upstream failed; main may have diverged and needs a manual reconcile."
+            echo "${response}"
             exit 1
-          fi
+          }
+          echo "${response}"
 
-          if git merge-base --is-ancestor HEAD "${upstream_sha}"; then
-            echo "Fast-forwarding."
-            git merge --ff-only "${upstream_sha}"
-          else
-            echo "Local workflow commit present; merging upstream in."
-            git merge --no-edit "${upstream_sha}"
-          fi
-
-          git push origin main
-          echo "main is now at $(git rev-parse --short HEAD)."
+          new_sha="$(gh api repos/${GITHUB_REPOSITORY}/commits/main --jq .sha)"
+          echo "main is now at ${new_sha}."
