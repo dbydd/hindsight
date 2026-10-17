@@ -70,12 +70,17 @@ jobs:
             exit 0
           fi
 
-          # Refuse to merge if the only local commit is not this workflow: real local work
-          # on main is a deliberate divergence a bot must not paper over.
-          local_commits="$(git rev-list --count "upstream/main..HEAD")"
-          if [ "${local_commits}" -gt 1 ]; then
-            echo "::error::main carries ${local_commits} local commits, not just this workflow; refusing auto-merge."
-            git log --oneline "upstream/main..HEAD"
+          # Previous syncs add merge commits, and workflow maintenance can add several
+          # commits. Inspect the fork-only tree changes instead: only this workflow file is
+          # allowed locally; any other changed path is deliberate divergence.
+          local_paths="$(git diff --name-only upstream/main...HEAD)"
+          unexpected_paths=""
+          if [ -n "${local_paths}" ]; then
+            unexpected_paths="$(printf '%s\n' "${local_paths}" | grep -vxF '.github/workflows/sync-upstream.yml' || true)"
+          fi
+          if [ -n "${unexpected_paths}" ]; then
+            echo "::error::main has fork-only changes outside the sync workflow; refusing auto-merge."
+            printf '%s\n' "${unexpected_paths}"
             exit 1
           fi
 
